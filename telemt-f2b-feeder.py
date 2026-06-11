@@ -29,7 +29,6 @@ import time
 import urllib.request
 import urllib.error
 from datetime import datetime
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 # ── Конфиг ────────────────────────────────────────────────────────────────────
@@ -39,24 +38,17 @@ TELEMT_AUTH = os.environ.get("TELEMT_AUTH", "")
 F2B_LOG     = os.environ.get("F2B_LOG", "/var/log/telemt-bad-fp.log")
 FP_LIMIT    = int(os.environ.get("FP_LIMIT", "1000"))
 
-# Минимальное соотношение плохих к общим чтобы IP попал в бан
-# 1.0 = только если ВСЕ соединения с этого IP плохие
-# 0.5 = банить если более 50% соединений плохие
 BAD_RATIO_THRESHOLD = float(os.environ.get("BAD_RATIO_THRESHOLD", "1.0"))
-
-# Минимальное число плохих соединений для бана (защита от единичных зондов)
 MIN_BAD_COUNT = int(os.environ.get("MIN_BAD_COUNT", "1"))
 
-# Retry settings
-API_RETRIES    = int(os.environ.get("API_RETRIES", "3"))
+API_RETRIES     = int(os.environ.get("API_RETRIES", "3"))
 API_RETRY_DELAY = int(os.environ.get("API_RETRY_DELAY", "2"))
 
-# Log rotation settings
-LOG_MAX_SIZE    = int(os.environ.get("LOG_MAX_SIZE", "10485760"))  # 10MB
+LOG_MAX_SIZE     = int(os.environ.get("LOG_MAX_SIZE", "10485760"))
 LOG_BACKUP_COUNT = int(os.environ.get("LOG_BACKUP_COUNT", "5"))
 
 
-# ── Logging ───────────────────────────────────────────────────────────────────
+# ── Logging (только для консоли) ──────────────────────────────────────────────
 
 def setup_logging() -> logging.Logger:
     logger = logging.getLogger("telemt-f2b")
@@ -67,23 +59,9 @@ def setup_logging() -> logging.Logger:
         datefmt="%Y-%m-%d %H:%M:%S"
     )
 
-    # Console handler (for systemd journal)
     console = logging.StreamHandler(sys.stderr)
     console.setFormatter(formatter)
     logger.addHandler(console)
-
-    # File handler with rotation
-    log_path = Path(F2B_LOG)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    file_handler = RotatingFileHandler(
-        F2B_LOG,
-        maxBytes=LOG_MAX_SIZE,
-        backupCount=LOG_BACKUP_COUNT,
-        encoding="utf-8"
-    )
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
 
     return logger
 
@@ -144,14 +122,9 @@ def fetch_fingerprints() -> dict:
 # ── Логика определения плохих IP ──────────────────────────────────────────────
 
 def get_bad_ips(data: dict) -> list[str]:
-    """
-    Возвращает список IP у которых все соединения плохие (bad_or_probe).
-    Использует by_ip — агрегация по конкретному IP адресу.
-    """
     inner = data.get("data", {})
     by_ip = inner.get("by_ip", [])
 
-    # Группируем по scope (IP), суммируем по всем fingerprints с этого IP
     ip_stats: dict[str, dict] = {}
     for entry in by_ip:
         ip = entry.get("scope", "")
@@ -177,21 +150,36 @@ def get_bad_ips(data: dict) -> list[str]:
 
 # ── Запись в лог для Fail2ban ─────────────────────────────────────────────────
 
+def rotate_log(path: Path):
+    if not path.exists():
+        return
+    if path.stat().st_size < LOG_MAX_SIZE:
+        return
+    for i in range(LOG_BACKUP_COUNT - 1, 0, -1):
+        src = path.with_suffix(f".log.{i}")
+        dst = path.with_suffix(f".log.{i + 1}")
+        if src.exists():
+            src.rename(dst)
+    backup = path.with_suffix(".log.1")
+    path.rename(backup)
+
+
 def write_log(ips: list[str]) -> int:
-    """
-    Пишет строки в лог-файл.
-    Формат: <timestamp> telemt-bad-fp: BAD_FP ip=<IP>
-    Fail2ban фильтр ищет именно эту строку.
-    Возвращает количество записанных IP.
-    """
     if not ips:
         return 0
 
+    log_path = Path(F2B_LOG)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    rotate_log(log_path)
+
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     written = 0
-    for ip in ips:
-        log.info("BAD_FP ip=%s", ip)
-        written += 1
+    with log_path.open("a") as f:
+        for ip in ips:
+            f.write(f"{now} telemt-bad-fp: BAD_FP ip={ip}\n")
+            written += 1
+        f.flush()
 
     return written
 
@@ -223,7 +211,7 @@ def main():
     written = write_log(bad_ips)
 
     if written:
-        log.info("Wrote %d bad IP(s) to %s: %s", written, F2B_LOG, ", ".join(bad_ips))
+        log.info("Wrote %d bad IP(s): %s", written, ", ".join(bad_ips))
     else:
         log.info("No bad IPs found.")
 
