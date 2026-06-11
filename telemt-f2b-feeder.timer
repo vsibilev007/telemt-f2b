@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Telemt Bad Fingerprint Feeder every 5 minutes
+Requires=telemt-f2b-feeder.service
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=5min
+AccuracySec=30
+Unit=telemt-f2b-feeder.service
+
+[Install]
+WantedBy=timers.target

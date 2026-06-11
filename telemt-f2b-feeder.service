@@ -1,0 +1,27 @@
+[Unit]
+Description=Telemt Bad Fingerprint Feeder for Fail2ban
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/telemt_f2b/
+
+# Переменные окружения — подстрой под свой конфиг
+Environment=TELEMT_URL=http://127.0.0.1:9091
+Environment=F2B_LOG=/var/log/telemt-bad-fp.log
+Environment=FP_LIMIT=1000
+Environment=BAD_RATIO_THRESHOLD=1.0
+Environment=MIN_BAD_COUNT=1
+Environment=API_RETRIES=3
+Environment=API_RETRY_DELAY=2
+Environment=LOG_MAX_SIZE=10485760
+Environment=LOG_BACKUP_COUNT=5
+
+# Если нужна авторизация — раскомментируй:
+# Environment=TELEMT_AUTH=Bearer <your_token>
+
+ExecStart=/usr/bin/python3 /opt/telemt_f2b/telemt-f2b-feeder.py
+
+StandardOutput=journal
+StandardError=journal
