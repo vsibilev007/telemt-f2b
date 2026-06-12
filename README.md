@@ -4,7 +4,7 @@
 
 ## Описание
 
-Скрипт `telemt-f2b-feeder.py` периодически запрашивает API Telemt `/v1/runtime/tls-fingerprints`, определяет IP-адреса с плохими отпечатками TLS и записывает их в лог-файл. Fail2ban читает этот лог и блокирует подозрительные IP через UFW.
+Скрипт `telemt-f2b-feeder.py` периодически запрашивает API Telemt `/v1/runtime/tls-fingerprints`, определяет IP-адреса с плохими отпечатками TLS и записывает их в лог-файл. Fail2ban читает этот лог и блокирует подозрительные IP через iptables.
 
 ### Как это работает
 
@@ -12,20 +12,19 @@
 2. **Feeder** запускается каждые 5 минут, запрашивает отпечатки через API
 3. **Анализ**: для каждого IP считается доля «плохих» соединений (`bad_or_probe / total`)
 4. **Бан**: если доля >= `BAD_RATIO_THRESHOLD` и количество >= `MIN_BAD_COUNT`, IP пишется в лог
-5. **Fail2ban** читает лог и применяет бан через UFW
+5. **Fail2ban** читает лог и применяет бан через iptables (цепочка `f2b-telemt`)
 
 ### Пример лога
 
 ```
-2025-01-15 14:30:22 telemt-bad-fp: BAD_FP ip=192.168.1.100
-2025-01-15 14:30:22 telemt-bad-fp: BAD_FP ip=10.0.0.55
+2026-06-12 00:49:19 telemt-bad-fp: BAD_FP ip=144.202.82.88
+2026-06-12 00:49:19 telemt-bad-fp: BAD_FP ip=77.83.39.54
 ```
 
 ## Требования
 
 - Python 3.8+
 - Fail2ban
-- UFW (или другой action в fail2ban)
 - Telemt с включенным мониторингом отпечатков
 
 ## Установка
@@ -54,7 +53,7 @@ sudo cp telemt-bad-fp.conf /etc/fail2ban/filter.d/
 # Jail (правила бана)
 sudo cp jail.d-telemt-bad-fp.conf /etc/fail2ban/jail.d/telemt-bad-fp.conf
 
-# Action (бан через UFW)
+# Action (бан через iptables)
 sudo cp action.d-ufw-telemt.conf /etc/fail2ban/action.d/ufw-telemt.conf
 ```
 
@@ -108,8 +107,11 @@ sudo journalctl -u telemt-f2b-feeder.service -n 20
 # Посмотреть что написал feeder в лог
 sudo tail -f /var/log/telemt-bad-fp.log
 
-# Список забаненных IP
+# Список забаненных IP в fail2ban
 sudo fail2ban-client get telemt-bad-fp banned
+
+# Посмотреть правила iptables
+sudo iptables -L f2b-telemt -n
 
 # Разбанить конкретный IP
 sudo fail2ban-client set telemt-bad-fp unbanip 1.2.3.4
@@ -148,6 +150,26 @@ maxretry = 1         # бан с первого попадания
 action   = ufw-telemt
 ```
 
+### Fail2ban action
+
+Файл `/etc/fail2ban/action.d/ufw-telemt.conf`:
+
+```ini
+[Definition]
+actionstart = iptables -N f2b-telemt 2>/dev/null || true
+              iptables -I INPUT -j f2b-telemt
+
+actionstop  = iptables -D INPUT -j f2b-telemt 2>/dev/null || true
+              iptables -F f2b-telemt 2>/dev/null || true
+              iptables -X f2b-telemt 2>/dev/null || true
+
+actionban   = iptables -I f2b-telemt 1 -s <ip> -j DROP
+
+actionunban = iptables -D f2b-telemt -s <ip> -j DROP
+```
+
+Action создаёт отдельную цепочку `f2b-telemt` в iptables и добавляет правила DROP для забаненных IP.
+
 ## Логика бана
 
 Feeder читает `by_ip` из `/v1/runtime/tls-fingerprints` и банит IP если:
@@ -170,7 +192,7 @@ telemt-f2b/
 ├── telemt-f2b-feeder.py          # Основной скрипт
 ├── telemt-bad-fp.conf            # Fail2ban filter
 ├── jail.d-telemt-bad-fp.conf     # Fail2ban jail
-├── action.d-ufw-telemt.conf      # Fail2ban action (UFW)
+├── action.d-ufw-telemt.conf      # Fail2ban action (iptables)
 ├── telemt-f2b-feeder.service     # Systemd service
 ├── telemt-f2b-feeder.timer       # Systemd timer
 ├── LICENSE                        # MIT License
@@ -200,6 +222,11 @@ sudo rm -rf /opt/telemt_f2b/
 
 # Удалить логи
 sudo rm /var/log/telemt-bad-fp.log*
+
+# Очистить цепочку iptables (если осталась)
+sudo iptables -D INPUT -j f2b-telemt 2>/dev/null
+sudo iptables -F f2b-telemt 2>/dev/null
+sudo iptables -X f2b-telemt 2>/dev/null
 ```
 
 ## Лицензия
